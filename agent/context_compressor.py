@@ -163,7 +163,7 @@ class ContextCompressor:
             min_protect = min(protect_tail_count, len(result) - 1)
             for i in range(len(result) - 1, -1, -1):
                 msg = result[i]
-                content_len = len(msg.get("content") or "")
+                content_len = len(self._coerce_content_to_text(msg.get("content")))
                 msg_tokens = content_len // _CHARS_PER_TOKEN + 10
                 for tc in msg.get("tool_calls") or []:
                     if isinstance(tc, dict):
@@ -182,7 +182,7 @@ class ContextCompressor:
             msg = result[i]
             if msg.get("role") != "tool":
                 continue
-            content = msg.get("content", "")
+            content = self._coerce_content_to_text(msg.get("content"))
             if not content or content == _PRUNED_TOOL_PLACEHOLDER:
                 continue
             # Only prune if the content is substantial (>200 chars)
@@ -207,6 +207,52 @@ class ContextCompressor:
         budget = int(content_tokens * _SUMMARY_RATIO)
         return max(_MIN_SUMMARY_TOKENS, min(budget, self.max_summary_tokens))
 
+    @staticmethod
+    def _coerce_content_to_text(content: Any) -> str:
+        """Convert structured or multimodal message content into readable text."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for part in content:
+                text = ContextCompressor._coerce_content_to_text(part)
+                if text and text.strip():
+                    parts.append(text)
+            return "\n".join(parts)
+        if isinstance(content, dict):
+            ptype = str(content.get("type") or "")
+            if ptype in {"text", "input_text"}:
+                return ContextCompressor._coerce_content_to_text(content.get("text"))
+            if ptype in {"image_url", "input_image"}:
+                image_data = content.get("image_url") or content.get("url") or {}
+                if isinstance(image_data, dict):
+                    image_url = str(image_data.get("url") or "")
+                else:
+                    image_url = str(image_data or "")
+                return f"[image:{image_url}]" if image_url else "[image]"
+            if ptype == "image":
+                source = content.get("source", {})
+                if isinstance(source, dict):
+                    media_type = str(source.get("media_type") or "")
+                    return f"[image:{media_type}]" if media_type else "[image]"
+                return "[image]"
+            if ptype in {"input_audio", "audio"}:
+                transcript = ContextCompressor._coerce_content_to_text(
+                    content.get("transcript") or content.get("text"),
+                )
+                return transcript or "[audio]"
+
+            for key in ("text", "content"):
+                if key in content:
+                    text = ContextCompressor._coerce_content_to_text(content.get(key))
+                    if text:
+                        return text
+
+            return str(content)
+        return str(content)
+
     # Truncation limits for the summarizer input.  These bound how much of
     # each message the summary model sees — the budget is the *summary*
     # model's context window, not the main model's.
@@ -226,7 +272,7 @@ class ContextCompressor:
         parts = []
         for msg in turns:
             role = msg.get("role", "unknown")
-            content = msg.get("content") or ""
+            content = self._coerce_content_to_text(msg.get("content"))
 
             # Tool results: keep enough content for the summarizer
             if role == "tool":
@@ -560,7 +606,7 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         for i in range(n - 1, head_end - 1, -1):
             msg = messages[i]
-            content = msg.get("content") or ""
+            content = self._coerce_content_to_text(msg.get("content"))
             msg_tokens = len(content) // _CHARS_PER_TOKEN + 10  # +10 for role/metadata
             # Include tool call arguments in estimate
             for tc in msg.get("tool_calls") or []:
@@ -669,7 +715,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             msg = messages[i].copy()
             if i == 0 and msg.get("role") == "system" and self.compression_count == 0:
                 msg["content"] = (
-                    (msg.get("content") or "")
+                    self._coerce_content_to_text(msg.get("content"))
                     + "\n\n[Note: Some earlier conversation turns have been compacted into a handoff summary to preserve context space. The current session state may still reflect earlier work, so build on that summary and state rather than re-doing work.]"
                 )
             compressed.append(msg)
@@ -715,8 +761,11 @@ Write only the summary body. Do not include any preamble or prefix."""
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
             if _merge_summary_into_tail and i == compress_end:
-                original = msg.get("content") or ""
-                msg["content"] = summary + "\n\n" + original
+                original = msg.get("content")
+                if isinstance(original, list):
+                    msg["content"] = [{"type": "text", "text": summary + "\n\n"}] + list(original)
+                else:
+                    msg["content"] = summary + "\n\n" + self._coerce_content_to_text(original)
                 _merge_summary_into_tail = False
             compressed.append(msg)
 
