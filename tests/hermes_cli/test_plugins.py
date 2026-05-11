@@ -573,6 +573,40 @@ class TestPluginContext:
         from tools.registry import registry
         assert "plugin_echo" in registry._tools
 
+    def test_force_rediscovery_deregisters_removed_plugin_tools(self, tmp_path, monkeypatch):
+        """Plugin tools do not survive after their plugin disappears on rediscovery."""
+        import hermes_cli.plugins as plugins_mod
+        from tools.registry import registry
+
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "stale_plugin",
+            register_body=(
+                'ctx.register_tool('
+                'name="stale_tool", '
+                'toolset="plugin_stale", '
+                'schema={"name": "stale_tool", "description": "Stale", "parameters": {"type": "object", "properties": {}}}, '
+                'handler=lambda args, **kw: "stale")'
+            ),
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        mgr = PluginManager()
+        monkeypatch.setattr(plugins_mod, "_plugin_manager", mgr)
+
+        discover_plugins()
+        assert "stale_tool" in registry._tools
+
+        config_path = tmp_path / "hermes_test" / "config.yaml"
+        config_path.write_text("plugins:\n  disabled:\n    - stale_plugin\n")
+
+        discover_plugins(force=True)
+
+        assert "stale_plugin" in mgr._plugins
+        assert not mgr._plugins["stale_plugin"].enabled
+        assert "stale_tool" not in registry._tools
+
 
 # ── TestPluginToolVisibility ───────────────────────────────────────────────
 

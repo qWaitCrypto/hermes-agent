@@ -699,13 +699,7 @@ class PluginManager:
         if self._discovered and not force:
             return
         if force:
-            self._plugins.clear()
-            self._hooks.clear()
-            self._plugin_tool_names.clear()
-            self._cli_commands.clear()
-            self._plugin_commands.clear()
-            self._plugin_skills.clear()
-            self._context_engine = None
+            self._reset_runtime_state()
         self._discovered = True
 
         manifests: List[PluginManifest] = []
@@ -855,6 +849,30 @@ class PluginManager:
                 len(self._plugins),
                 sum(1 for p in self._plugins.values() if p.enabled),
             )
+
+    def _reset_runtime_state(self) -> None:
+        """Clear loaded plugin state before a forced rediscovery."""
+        self._deregister_plugin_tools()
+        self._plugins.clear()
+        self._hooks.clear()
+        self._plugin_tool_names.clear()
+        self._cli_commands.clear()
+        self._plugin_commands.clear()
+        self._plugin_skills.clear()
+        self._context_engine = None
+
+    def _deregister_plugin_tools(self) -> None:
+        """Remove tools registered by the previous plugin discovery pass."""
+        if not self._plugin_tool_names:
+            return
+        try:
+            from tools.registry import registry
+        except Exception as exc:
+            logger.debug("Could not deregister plugin tools during rediscovery: %s", exc)
+            return
+
+        for tool_name in list(self._plugin_tool_names):
+            registry.deregister(tool_name)
 
     # -----------------------------------------------------------------------
     # Directory scanning
